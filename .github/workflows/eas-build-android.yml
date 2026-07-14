@@ -1,0 +1,71 @@
+name: Build Android (EAS)
+
+on:
+  push:
+    branches: [ 'android/prepare-expo-android' ]
+  workflow_dispatch:
+
+jobs:
+  eas-build-android:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install repo dependencies (mobile)
+        run: |
+          cd packages/mobile
+          npm ci
+
+      - name: Install EAS CLI and jq
+        run: |
+          npm install -g eas-cli
+          sudo apt-get update && sudo apt-get install -y jq curl
+
+      - name: Start EAS build (Android)
+        env:
+          EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
+        run: |
+          set -euo pipefail
+          cd packages/mobile
+          echo "Starting EAS build (profile: preview). This requires EXPO_TOKEN secret to be set in repository settings."
+
+          # Start build and capture JSON output (requires eas-cli >= v2.0 behaviour)
+          BUILD_JSON=$(eas build --platform android --profile preview --non-interactive --json)
+          echo "$BUILD_JSON" > /tmp/eas-build-start.json
+
+          BUILD_ID=$(echo "$BUILD_JSON" | jq -r '.id')
+          echo "Build ID: $BUILD_ID"
+
+          # Wait for build to finish
+          eas build:wait --platform android --id "$BUILD_ID" --non-interactive
+
+          INSPECT_JSON=$(eas build:inspect --platform android --id "$BUILD_ID" --json)
+          echo "$INSPECT_JSON" > /tmp/eas-build-inspect.json
+
+          # Try to extract artifact URL (handles different eas-cli shapes)
+          ARTIFACT_URL=$(echo "$INSPECT_JSON" | jq -r '.artifacts.buildUrl // .artifacts.url // .artifacts[0].url // empty')
+          echo "Artifact URL: $ARTIFACT_URL"
+
+          if [ -z "$ARTIFACT_URL" ]; then
+            echo "No artifact URL found in eas build inspect output. Check build logs on Expo dashboard."
+            exit 1
+          fi
+
+          # Download artifact
+          curl -L -o app.apk "$ARTIFACT_URL"
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: opencode-android-apk
+          path: app.apk
+
+      - name: Output build info
+        run: |
+          echo "EAS build started and artifact uploaded as opencode-android-apk. If the workflow failed, check EAS logs in the job output or on https://expo.dev/accounts/$(echo ${{ github.repository_owner }})/projects"
