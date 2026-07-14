@@ -1,0 +1,96 @@
+name: Build Android (prebuild + Gradle)
+
+on:
+  push:
+    branches: [ 'android/prepare-expo-android' ]
+  workflow_dispatch:
+
+env:
+  ANDROID_SDK_ROOT: ${{ runner.workspace }}/android-sdk
+
+jobs:
+  build-android-apk:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 11
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '11'
+
+      - name: Install required packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y wget unzip git-core
+
+      - name: Install Android SDK command-line tools
+        run: |
+          mkdir -p $ANDROID_SDK_ROOT/cmdline-tools
+          cd $ANDROID_SDK_ROOT
+          wget -q https://dl.google.com/android/repository/commandlinetools-linux-9477386_latest.zip -O cmdline-tools.zip
+          unzip -q cmdline-tools.zip -d cmdline-tools
+          rm cmdline-tools.zip
+          mkdir -p $ANDROID_SDK_ROOT/cmdline-tools/latest
+          mv cmdline-tools/cmdline-tools/* $ANDROID_SDK_ROOT/cmdline-tools/latest/ || true
+
+      - name: Add Android SDK tools to PATH
+        run: |
+          echo "##[add-path]" # placeholder for legacy logs
+          echo "PATH=$ANDROID_SDK_ROOT/cmdline-tools/latest/bin:$ANDROID_SDK_ROOT/platform-tools:$PATH" >> $GITHUB_ENV
+
+      - name: Accept Android SDK licenses and install platforms/build-tools
+        env:
+          ANDROID_SDK_ROOT: ${{ env.ANDROID_SDK_ROOT }}
+          PATH: ${{ env.PATH }}
+        run: |
+          yes | $ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager --sdk_root=${ANDROID_SDK_ROOT} --install "platform-tools" "platforms;android-33" "build-tools;33.0.2"
+          yes | $ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager --sdk_root=${ANDROID_SDK_ROOT} --licenses || true
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Cache node modules
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.npm
+            packages/mobile/node_modules
+          key: ${{ runner.os }}-node-${{ hashFiles('**/packages/mobile/package-lock.json') }}
+          restore-keys: |
+            ${{ runner.os }}-node-
+
+      - name: Install mobile dependencies
+        working-directory: packages/mobile
+        run: |
+          npm ci
+
+      - name: Install expo-cli
+        run: |
+          npm install -g expo-cli
+
+      - name: Run expo prebuild (generate native android project)
+        working-directory: packages/mobile
+        env:
+          EXPO_NO_DOCTOR: 1
+        run: |
+          npx expo prebuild --platform android --non-interactive --yes
+
+      - name: Build Android debug APK with Gradle
+        working-directory: packages/mobile/android
+        run: |
+          chmod +x ./gradlew
+          ./gradlew assembleDebug -Porg.gradle.jvmargs="-Xmx2048m"
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: opencode-android-apk
+          path: packages/mobile/android/app/build/outputs/apk/debug/app-debug.apk
+
+      - name: Done
+        run: echo "APK built and uploaded as artifact: opencode-android-apk"
